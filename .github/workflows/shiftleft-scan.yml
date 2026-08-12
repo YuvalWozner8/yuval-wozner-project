@@ -1,0 +1,55 @@
+name: Upwind Code Image Scan
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t local-test:${{ github.sha }} .
+
+      - name: Upwind ShiftLeft Image Scan
+        uses: upwindsecurity/shiftleft-create-image-scan-event-action@main
+        with:
+          upwind_client_id: ${{ secrets.UPWIND_CLIENT_ID }}
+          upwind_client_secret: ${{ secrets.UPWIND_CLIENT_SECRET }}
+          upwind_uri: upwind.dev          # for the dev console
+          docker_image: local-test:${{ github.sha }}
+          pull_image: false               # image is local
+          output_json: scan.json
+          # comment only on PRs (push-to-main just establishes the baseline)
+          add_comment: ${{ github.event_name == 'pull_request' }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ github.event.pull_request.number }}
+          repo_name: ${{ github.repository }}
+          # On a PR, diff against the base branch's latest scanned image (vs main).
+          # On push-to-main this is empty -> normal scan that becomes the baseline.
+          main_branch: ${{ github.event.pull_request.base.ref && format('refs/heads/{0}', github.event.pull_request.base.ref) || '' }}
+          pr_id: ${{ github.event.pull_request.number }}
+
+      - name: DEBUG dump scan.json (compareTo / introduced / resolved)
+        if: always()
+        run: |
+          echo "===== event=${{ github.event_name }} ====="
+          echo "main_branch=${{ github.event.pull_request.base.ref && format('refs/heads/{0}', github.event.pull_request.base.ref) || '' }}"
+          echo "===== per-arch baseline + diff buckets ====="
+          jq -c 'if type=="array" then .[] else . end
+                 | {arch, branch, compareTo,
+                    introduced: ((.introducedCves // []) | length),
+                    resolved:   ((.resolvedCves // []) | length),
+                    noChange:   ((.noChangeCves // []) | length)}' scan.json || cat scan.json || echo "no scan.json"
+
+      - name: DEBUG upload scan.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-json-${{ github.event_name }}
+          path: scan.json
+          if-no-files-found: warn
